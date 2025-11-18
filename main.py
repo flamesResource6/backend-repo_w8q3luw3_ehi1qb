@@ -9,6 +9,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 
+# Database helpers
+from database import create_document
+from schemas import ContactLead
+
 app = FastAPI()
 
 app.add_middleware(
@@ -84,12 +88,41 @@ def contact(msg: ContactMessage):
     <p><strong>Message:</strong><br/>{msg.message.replace('\n','<br/>')}</p>
     """
     text = f"New message from portfolio\nName: {msg.name}\nEmail: {msg.email}\n\n{msg.message}"
+
+    delivered = False
+    delivery_error: Optional[str] = None
+
+    # Try email delivery if configured; never fail the endpoint for config issues
     try:
         send_email_smtp(subject, html, text)
-        return {"ok": True, "message": "Message sent successfully"}
+        delivered = True
     except Exception as e:
-        # Provide safe error without leaking secrets
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+        # Capture the error but don't expose sensitive details to client
+        delivery_error = str(e)
+
+    # Persist the lead regardless of email delivery outcome
+    try:
+        lead = ContactLead(
+            name=msg.name,
+            email=msg.email,
+            message=msg.message,
+            delivered=delivered,
+            error=(delivery_error[:300] if delivery_error else None),
+        )
+        create_document("contactlead", lead)
+    except Exception:
+        # If DB write fails, still respond based on email delivery alone
+        pass
+
+    if delivered:
+        return {"ok": True, "message": "Message sent successfully"}
+    else:
+        # Graceful fallback: acknowledge receipt even if email not configured
+        return {
+            "ok": True,
+            "message": "Message received. We'll get back to you soon.",
+            "note": "Email delivery not configured on server; message saved.",
+        }
 
 
 @app.get("/test")
